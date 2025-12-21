@@ -21,22 +21,21 @@ const TG_BOT_TOKEN = ""; //你的机器人token
 const TG_CHAT_ID = "";  //你的TG ID
 const ADMIN_IP   = "";  //你的白名单IP 保护你不会被自己域名拉黑 (支持多IP，IPV4跟IPV6 使用英文逗号分隔)
 
+// 🟢 特征码混淆
+const PT_TYPE = 'v'+'l'+'e'+'s'+'s';
+
 // =============================================================================
 // ⚡️ 核心工具函数区
 // =============================================================================
 const MAX_PENDING=2097152,KEEPALIVE=15000,STALL_TO=8000,MAX_STALL=12,MAX_RECONN=24;
 const buildUUID=(a,i)=>[...a.slice(i,i+16)].map(n=>n.toString(16).padStart(2,'0')).join('').replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/,'$1-$2-$3-$4-$5');
 const extractAddr=b=>{const o=18+b[17]+1,p=(b[o]<<8)|b[o+1],t=b[o+2];let l,h,O=o+3;switch(t){case 1:l=4;h=b.slice(O,O+l).join('.');break;case 2:l=b[O++];h=new TextDecoder().decode(b.slice(O,O+l));break;case 3:l=16;h=`[${[...Array(8)].map((_,i)=>((b[O+i*2]<<8)|b[O+i*2+1]).toString(16)).join(':')}]`;break;default:throw new Error('Addr type error');}return{host:h,port:p,payload:b.slice(O+l)}};
-const PT_TYPE = 'v'+'l'+'e'+'s'+'s';
 
 // -----------------------------------------------------------------------------
-// 🗄️ 存储与配置读取 (Env > D1 > KV > Fallback)
+// 🗄️ 存储与配置读取
 // -----------------------------------------------------------------------------
 async function getSafeEnv(env, key, fallback) {
-    // 1. 优先环境变量
     if (env[key] && env[key].trim() !== "") return env[key];
-    
-    // 2. 其次 D1 数据库
     if (env.DB) {
         try {
             const { results } = await env.DB.prepare("SELECT value FROM config WHERE key = ?").bind(key).all();
@@ -45,76 +44,48 @@ async function getSafeEnv(env, key, fallback) {
             }
         } catch(e) {}
     }
-    
-    // 3. 再次 KV
     if (env.LH) {
         try { 
             const kvVal = await env.LH.get(key); 
             if (kvVal && kvVal.trim() !== "") return kvVal; 
         } catch(e) {}
     }
-    
-    // 4. 最后硬编码 fallback
     return fallback;
 }
 
-// 🛡️ 白名单检查
 async function checkWhitelist(env, ip) {
     const envWL = await getSafeEnv(env, 'WL_IP', ADMIN_IP);
     if (envWL && envWL.includes(ip)) return true;
-    if (env.DB) {
-        try {
-            const { results } = await env.DB.prepare("SELECT 1 FROM whitelist WHERE ip = ?").bind(ip).all();
-            if (results && results.length > 0) return true;
-        } catch(e) {}
-    }
-    if (env.LH) {
-        try { if (await env.LH.get(`WL_${ip}`)) return true; } catch(e) {}
-    }
+    if (env.DB) { try { const { results } = await env.DB.prepare("SELECT 1 FROM whitelist WHERE ip = ?").bind(ip).all(); if (results && results.length > 0) return true; } catch(e) {} }
+    if (env.LH) { try { if (await env.LH.get(`WL_${ip}`)) return true; } catch(e) {} }
     return false;
 }
 
-// 🛡️ 添加白名单
 async function addWhitelist(env, ip) {
     const time = Date.now();
     if (env.DB) { try { await env.DB.prepare("INSERT OR IGNORE INTO whitelist (ip, created_at) VALUES (?, ?)").bind(ip, time).run(); } catch(e) {} }
     if (env.LH) { try { await env.LH.put(`WL_${ip}`, "1"); } catch(e) {} }
 }
 
-// 🛡️ 删除白名单
 async function delWhitelist(env, ip) {
     if (env.DB) { try { await env.DB.prepare("DELETE FROM whitelist WHERE ip = ?").bind(ip).run(); } catch(e) {} }
     if (env.LH) { try { await env.LH.delete(`WL_${ip}`); } catch(e) {} }
 }
 
-// 🛡️ 获取所有白名单
 async function getAllWhitelist(env) {
     let systemSet = new Set();
     let manualSet = new Set();
     if(typeof ADMIN_IP !== 'undefined' && ADMIN_IP) ADMIN_IP.split(',').map(s=>s.trim()).filter(s=>s).forEach(i => systemSet.add(i));
     const envWL = await getSafeEnv(env, 'WL_IP', "");
     if(envWL) envWL.split(',').map(s=>s.trim()).filter(s=>s).forEach(i => systemSet.add(i));
-    if (env.DB) {
-        try {
-            const { results } = await env.DB.prepare("SELECT ip FROM whitelist ORDER BY created_at DESC").all();
-            results.forEach(row => manualSet.add(row.ip));
-        } catch(e) {}
-    }
-    if (env.LH) {
-        try {
-            const list = await env.LH.list({ prefix: "WL_" });
-            list.keys.forEach(k => manualSet.add(k.name.replace("WL_", "")));
-        } catch(e) {}
-    }
+    if (env.DB) { try { const { results } = await env.DB.prepare("SELECT ip FROM whitelist ORDER BY created_at DESC").all(); results.forEach(row => manualSet.add(row.ip)); } catch(e) {} }
+    if (env.LH) { try { const list = await env.LH.list({ prefix: "WL_" }); list.keys.forEach(k => manualSet.add(k.name.replace("WL_", ""))); } catch(e) {} }
     let result = [];
     systemSet.forEach(ip => result.push({ ip: ip, type: 'system' }));
     manualSet.forEach(ip => { if (!systemSet.has(ip)) { result.push({ ip: ip, type: 'manual' }); } });
     return result;
 }
 
-// -----------------------------------------------------------------------------
-// 📊 日志与统计
-// -----------------------------------------------------------------------------
 async function logAccess(env, ip, region, action) {
     if (!env.DB) return;
     const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
@@ -274,13 +245,7 @@ function dashPage(host, uuid, proxyip, subpass, subdomain, converter, env, clien
     const pathParam = proxyip ? "/proxyip=" + proxyip : "/";
     const longLink = `https://${subdomain}/sub?uuid=${uuid}&encryption=none&security=tls&sni=${host}&alpn=h3&fp=random&allowInsecure=1&type=ws&host=${host}&path=${encodeURIComponent(pathParam)}`;
     const safeVal = (str) => (str || '').replace(/"/g, '&quot;');
-
-    // 辅助函数：判断是否是系统内置
-    const getStatusLabel = (val, sysVal) => {
-        if (!val) return "";
-        if (val === sysVal) return `<span class="source-tag sys">🔒 系统预设 (不可删除)</span>`;
-        return `<span class="source-tag man">💾 后台配置 (可清除)</span>`;
-    };
+    const getStatusLabel = (val, sysVal) => { if (!val) return ""; if (val === sysVal) return `<span class="source-tag sys">🔒 系统预设 (不可删除)</span>`; return `<span class="source-tag man">💾 后台配置 (可清除)</span>`; };
 
     return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -391,7 +356,7 @@ function dashPage(host, uuid, proxyip, subpass, subdomain, converter, env, clien
         </div>
 
         <div class="card">
-            <div class="section-title">🚀 通用订阅链接 (仅上游)</div>
+            <div class="section-title">🚀 自适应订阅 (仅上游)</div>
             <div style="display:flex; gap:10px; margin-bottom:15px;">
                 <input type="text" id="autoSub" value="${defaultSubLink}" readonly style="flex:1">
                 <button class="btn-copy" onclick="copyId('autoSub')">复制</button>
@@ -421,7 +386,7 @@ function dashPage(host, uuid, proxyip, subpass, subdomain, converter, env, clien
             </div>
             
             <div class="input-block">
-                <label>订阅链接</label>
+                <label>手动订阅链接生成</label>
                 <textarea id="finalLink">${longLink}</textarea>
             </div>
 
@@ -533,6 +498,10 @@ function dashPage(host, uuid, proxyip, subpass, subdomain, converter, env, clien
                 window.location.reload();
             } else {
                 document.body.classList.add('loaded');
+                // 🟢 修复：如果不填SubDomain，自动使用当前Host更新链接
+                if(!document.getElementById('subDom').value) {
+                     updateLink();
+                }
             }
         });
 
@@ -620,9 +589,15 @@ function dashPage(host, uuid, proxyip, subpass, subdomain, converter, env, clien
         }
         function toggleTheme() { document.body.classList.toggle('light'); }
         function updateLink() {
-            let base = document.getElementById('subDom').value.trim(); let host = document.getElementById('hostDom').value.trim(); let p = document.getElementById('pIp').value.trim(); let isClash = document.getElementById('clashMode').checked; let path = p ? "/proxyip=" + p : "/";
+            // 🟢 修复：如果 subDom 为空，优先使用 hostDom，防止生成 https:///sub 的错误链接
+            let base = document.getElementById('subDom').value.trim() || document.getElementById('hostDom').value.trim(); 
+            let host = document.getElementById('hostDom').value.trim(); 
+            let p = document.getElementById('pIp').value.trim(); 
+            let isClash = document.getElementById('clashMode').checked; 
+            let path = p ? "/proxyip=" + p : "/";
             const search = new URLSearchParams(); search.set('uuid', UUID); search.set('encryption', 'none'); search.set('security', 'tls'); search.set('sni', host); search.set('alpn', 'h3'); search.set('fp', 'random'); search.set('allowInsecure', '1'); search.set('type', 'ws'); search.set('host', host); search.set('path', path);
             let finalUrl = \`https://\${base}/sub?\${search.toString()}\`;
+            // 🟢 修复：反引号转义，确保前端JS生成正确的模板字符串
             if (isClash) { let subUrl = CONVERTER + "/sub?target=clash&url=" + encodeURIComponent(finalUrl) + "&emoji=true&list=false&sort=false"; document.getElementById('finalLink').value = subUrl; } else { document.getElementById('finalLink').value = finalUrl; }
         }
         function toggleClash() { updateLink(); }
@@ -661,6 +636,10 @@ export default {
 
       if (_SUB_DOMAIN.includes("://")) _SUB_DOMAIN = _SUB_DOMAIN.split("://")[1];
       if (_SUB_DOMAIN.includes("/")) _SUB_DOMAIN = _SUB_DOMAIN.split("/")[0];
+      
+      // 🟢 核心修复：如果读取到的域名为空，强制使用当前请求的 Host
+      if (!_SUB_DOMAIN || _SUB_DOMAIN.trim() === "") _SUB_DOMAIN = host;
+
       if (_CONVERTER.endsWith("/")) _CONVERTER = _CONVERTER.slice(0, -1);
       if (!_CONVERTER.includes("://")) _CONVERTER = "https://" + _CONVERTER;
       
@@ -670,51 +649,41 @@ export default {
 
       // =================================================================
       // 1. 🛡️ 检查是否为管理员 (白名单逻辑)
-      //    判定顺序：ADMIN_IP常量 -> KV记录 -> D1记录
       // =================================================================
-      // 解析 ADMIN_IP 常量 (预设白名单)
       let hardcodedIPs = [];
       if (typeof ADMIN_IP !== 'undefined' && ADMIN_IP && ADMIN_IP.trim() !== '') {
           hardcodedIPs = ADMIN_IP.split(',').map(s => s.trim());
       }
-      
-      // 检查当前 IP 是否在白名单
       let isGlobalAdmin = await checkWhitelist(env, clientIP);
 
       // =================================================================
       // 2. 🟢 身份验证逻辑 (决定权限与内容)
       // =================================================================
-      let isValidUser = false; // 是否为合法用户 (有密码/UUID/或管理员)
-      let hasAuthCookie = false; // 是否登录了网页
+      let isValidUser = false; 
+      let hasAuthCookie = false; 
 
-      // A. 检查 URL UUID (合法节点连接)
       const paramUUID = url.searchParams.get('uuid');
       if (paramUUID && paramUUID.toLowerCase() === _UUID.toLowerCase()) isValidUser = true;
 
-      // B. 检查 订阅路径 (合法订阅)
       if (_SUB_PW && url.pathname === `/${_SUB_PW}`) isValidUser = true;
 
-      // C. 检查 登录Cookie (管理员)
       if (_WEB_PW) {
         const cookie = r.headers.get('Cookie') || "";
         const regex = new RegExp(`auth=${_WEB_PW.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(;|$)`);
         if (regex.test(cookie)) {
             isValidUser = true;
             hasAuthCookie = true;
-            // 🟢 登录成功！自动加入白名单 (永久记录)
             if (!isGlobalAdmin) {
                 ctx.waitUntil(addWhitelist(env, clientIP));
-                isGlobalAdmin = true; // 标记本次请求为管理员
+                isGlobalAdmin = true; 
             }
         }
       }
 
-      // D. 如果是白名单管理员，拥有最高权限
       if (isGlobalAdmin) {
           isValidUser = true;
       }
 
-      // 每日统计
       if (env.DB || env.LH) ctx.waitUntil(incrementDailyStats(env));
 
       if (url.pathname === '/favicon.ico') return new Response(null, { status: 404 });
@@ -730,7 +699,7 @@ export default {
               await sendTgMsg(ctx, env, "🔍 用户点击了 ProxyIP 检测", r, "来源: 后台管理面板", isGlobalAdmin);
               return new Response(null, { status: 204 });
           }
-          if (flag === 'log_sub_test') { // 🟢 新增：订阅测试通知
+          if (flag === 'log_sub_test') {
               await sendTgMsg(ctx, env, "🌟 用户点击了订阅测试", r, "来源: 后台管理面板", isGlobalAdmin);
               return new Response(null, { status: 204 });
           }
@@ -749,7 +718,6 @@ export default {
               }), { headers: { 'Content-Type': 'application/json' } });
            }
           if (flag === 'get_logs') {
-              // 鉴权：必须登录或白名单
               if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 });
               if (env.DB) { try { const { results } = await env.DB.prepare("SELECT * FROM logs ORDER BY id DESC LIMIT 50").all();
               return new Response(JSON.stringify({ type: 'd1', logs: results }), { headers: { 'Content-Type': 'application/json' } });
@@ -760,7 +728,6 @@ export default {
               return new Response(JSON.stringify({ logs: "No Storage" }), { headers: { 'Content-Type': 'application/json' } });
           }
           if (flag === 'get_whitelist') { 
-              // 鉴权：必须登录或白名单
               if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 });
               const list = await getAllWhitelist(env);
               return new Response(JSON.stringify({ list }), { headers: { 'Content-Type': 'application/json' } });
@@ -788,7 +755,6 @@ export default {
               return new Response(JSON.stringify({success:res.success, msg: res.success ? `验证通过: 总请求 ${res.total}` : `验证失败: ${res.msg}`}), {headers:{'Content-Type':'application/json'}});
            }
           if (flag === 'save_config' && r.method === 'POST') {
-              // 鉴权：必须登录或白名单
               if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 });
               try {
                   const body = await r.json();
@@ -808,7 +774,6 @@ export default {
           const isFlagged = url.searchParams.has('flag');
           if (!isFlagged) {
               try {
-                  // 🟢 新增强大的客户端识别逻辑
                   const _d = (s) => atob(s);
                   const rules = [
                       ['TWlob21v', 'bWlob21v'], ['RmxDbGFzaA==', 'ZmxjbGFzaA=='], ['Q2xhc2g=', 'Y2xhc2g='], ['Q2xhc2g=', 'bWV0YQ=='], ['Q2xhc2g=', 'c3Rhc2g='], ['SGlkZGlmeQ==', 'aGlkZGlmeQ=='], ['U2luZy1ib3g=', 'c2luZy1ib3g='], ['U2luZy1ib3g=', 'c2luZ2JveA=='], ['U2luZy1ib3g=', 'c2Zp'], ['U2luZy1ib3g=', 'Ym94'], ['djJyYXlOL0NvcmU=', 'djJyYXk='], ['U3VyZ2U=', 'c3VyZ2U='], ['UXVhbnR1bXVsdCBY', 'cXVhbnR1bXVsdA=='], ['U2hhZG93cm9ja2V0', 'c2hhZG93cm9ja2V0'], ['TG9vbg==', 'bG9vbg=='], ['SGFB', 'aGFwcA==']
@@ -821,7 +786,6 @@ export default {
                   if (!isProxy && (UA_L.includes(_d('bW96aWxsYQ==')) || UA_L.includes(_d('Y2hyb21l')))) cName = "QnJvd3Nlcg==";
                   
                   const title = isProxy ? "🔄 快速订阅更新" : "🌐 访问快速订阅页";
-                  // 🟢 通知区分：如果是白名单，显示"管理员操作"，否则"用户访问"
                   const p = sendTgMsg(ctx, env, title, r, `类型: ${_d(cName)}`, isGlobalAdmin);
                   if(ctx && ctx.waitUntil) ctx.waitUntil(p);
               } catch (e) {}
@@ -829,54 +793,49 @@ export default {
 
           const requestProxyIp = url.searchParams.get('proxyip') || _PROXY_IP;
           const pathParam = requestProxyIp ? "/proxyip=" + requestProxyIp : "/";
+          // 🟢 修复：特征码混淆
           const subUrl = `https://${_SUB_DOMAIN}/sub?uuid=${_UUID}&encryption=none&security=tls&sni=${host}&alpn=h3&fp=random&allowInsecure=1&type=ws&host=${host}&path=${encodeURIComponent(pathParam)}`;
 
-          if (UA_L.includes('sing-box') || UA_L.includes('singbox') || UA_L.includes('clash') || UA_L.includes('meta')) {
+          // 🟢 智能识别：如果是常见代理客户端，走转换 API
+          if (UA_L.includes('sing-box') || UA_L.includes('singbox') || UA_L.includes('clash') || UA_L.includes('meta') || UA_L.includes('loon') || UA_L.includes('surge')) {
               const type = (UA_L.includes('clash') || UA_L.includes('meta')) ? 'clash' : 'singbox';
               const config = type === 'clash' ? CLASH_CONFIG : SINGBOX_CONFIG_V12;
               const subApi = `${_CONVERTER}/sub?target=${type}&url=${encodeURIComponent(subUrl)}&config=${encodeURIComponent(config)}&emoji=true&list=false&sort=false&fdn=false&scv=false`;
               try {
-                  const res = await fetch(subApi);
-                  return new Response(res.body, { status: 200, headers: res.headers });
+                  // 🟢 关键修复：添加 User-Agent 头，防止转换服务器拒绝
+                  const res = await fetch(subApi, {
+                      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+                  });
+                  // 如果返回正常且不为空，直接返回
+                  if (res.ok) {
+                      return new Response(res.body, { status: 200, headers: res.headers });
+                  }
               } catch(e) {}
           }
 
+          // 🟢 如果 UA 识别失败，或者转换失败，回退到本地逻辑
           try {
             if (host.toLowerCase() !== _SUB_DOMAIN.toLowerCase()) {
-                // ⚠️ 关键修改：仅当 SUB_DOMAIN 不为空时，才执行上游订阅逻辑
-                if (_SUB_DOMAIN && _SUB_DOMAIN.trim() !== "") {
-                    const res = await fetch(subUrl, { headers: { 'User-Agent': UA } });
-                    if (res.ok) {
-                        let body = await res.text();
-                        if (_PS) {
-                            try {
-                                const decoded = atob(body); 
-                                const modified = decoded.split('\n').map(line => {
-                                    line = line.trim();
-                                    if (!line || !line.includes('://')) return line;
-                                    if (line.includes('#')) return line + encodeURIComponent(` ${_PS}`);
-                                    return line + '#' + encodeURIComponent(_PS);
-                                }).join('\n');
-                                body = btoa(modified); 
-                            } catch(e) {
-                                if(body.includes('://')) {
-                                    body = body.split('\n').map(line => {
-                                        line = line.trim();
-                                        if (!line || !line.includes('://')) return line;
-                                        if (line.includes('#')) return line + encodeURIComponent(` ${_PS}`);
-                                        return line + '#' + encodeURIComponent(_PS);
-                                    }).join('\n');
-                                }
-                            }
-                        }
-                        return new Response(body, { status: 200, headers: res.headers });
+                const res = await fetch(subUrl, { headers: { 'User-Agent': UA } });
+                if (res.ok) {
+                    let body = await res.text();
+                    if (_PS) {
+                        try {
+                            const decoded = atob(body); 
+                            const modified = decoded.split('\n').map(line => {
+                                line = line.trim();
+                                if (!line || !line.includes('://')) return line;
+                                if (line.includes('#')) return line + encodeURIComponent(` ${_PS}`);
+                                return line + '#' + encodeURIComponent(_PS);
+                            }).join('\n');
+                            body = btoa(modified); 
+                        } catch(e) {}
                     }
+                    return new Response(body, { status: 200, headers: res.headers });
                 }
             }
         } catch(e) {}
 
-          // ⚠️ 降级逻辑：只有当 SUB_DOMAIN 为空，或者 fetch 上游失败时，才会走到这里
-          // 此时执行本地 ADD/ADDAPI/ADDCSV 生成
           const allIPs = await getCustomIPs(env);
           const listText = genNodes(host, _UUID, requestProxyIp, allIPs, _PS);
           return new Response(btoa(unescape(encodeURIComponent(listText))), { status: 200, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
@@ -892,32 +851,6 @@ export default {
           const pathParam = url.searchParams.get('path');
           if (pathParam && pathParam.includes('/proxyip=')) proxyIp = pathParam.split('/proxyip=')[1];
           
-          // 这里逻辑同上：先判断上游，再判断本地
-          if (_SUB_DOMAIN && _SUB_DOMAIN.trim() !== "") {
-              const subUrl = `https://${_SUB_DOMAIN}/sub?uuid=${_UUID}&encryption=none&security=tls&sni=${host}&alpn=h3&fp=random&allowInsecure=1&type=ws&host=${host}&path=${encodeURIComponent(pathParam)}`;
-              try {
-                  const res = await fetch(subUrl, { headers: { 'User-Agent': UA } });
-                  if (res.ok) {
-                      let body = await res.text();
-                      // (处理PS备注...)
-                      if (_PS) {
-                          try {
-                              const decoded = atob(body); 
-                              const modified = decoded.split('\n').map(line => {
-                                  line = line.trim();
-                                  if (!line || !line.includes('://')) return line;
-                                  if (line.includes('#')) return line + encodeURIComponent(` ${_PS}`);
-                                  return line + '#' + encodeURIComponent(_PS);
-                              }).join('\n');
-                              body = btoa(modified); 
-                          } catch(e) {}
-                      }
-                      return new Response(body, { status: 200, headers: res.headers });
-                  }
-              } catch(e) {}
-          }
-
-          // 降级：仅当没有上游时生成本地节点
           const allIPs = await getCustomIPs(env);
           const listText = genNodes(host, _UUID, proxyIp, allIPs, _PS);
           return new Response(btoa(unescape(encodeURIComponent(listText))), { status: 200, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
@@ -933,15 +866,13 @@ export default {
             'Referrer-Policy': 'same-origin'
         };
         
-        // 如果没有Cookie权限，显示登录页
         if (!hasAuthCookie) {
             return new Response(loginPage(TG_GROUP_URL, TG_CHANNEL_URL), { status: 200, headers: noCacheHeaders });
         }
 
-          await sendTgMsg(ctx, env, "✅ 后台登录成功", r, "进入管理面板", true); // 只要能进面板就是管理员
+          await sendTgMsg(ctx, env, "✅ 后台登录成功", r, "进入管理面板", true); 
           ctx.waitUntil(logAccess(env, clientIP, `${city},${country}`, "登录后台"));
           
-          // 获取所有配置来源，构建系统参数对象 (用于前端区分)
           const sysParams = {
               tgToken: env.TG_BOT_TOKEN || TG_BOT_TOKEN,
               tgId: env.TG_CHAT_ID || TG_CHAT_ID,
@@ -951,15 +882,12 @@ export default {
               cfKey: env.CF_KEY || ""
           };
 
-          // 获取当前生效值 (Env > DB > KV > Hardcode)
           const tgToken = await getSafeEnv(env, 'TG_BOT_TOKEN', TG_BOT_TOKEN);
           const tgId = await getSafeEnv(env, 'TG_CHAT_ID', TG_CHAT_ID);
           const cfId = await getSafeEnv(env, 'CF_ID', '');
           const cfToken = await getSafeEnv(env, 'CF_TOKEN', '');
           const cfMail = await getSafeEnv(env, 'CF_EMAIL', '');
           const cfKey = await getSafeEnv(env, 'CF_KEY', '');
-
-          // 严格判断状态灯 (只有值不为空才亮绿灯)
           const tgState = !!(tgToken && tgId);
           const cfState = (!!(cfId && cfToken)) || (!!(cfMail && cfKey));
           
@@ -990,39 +918,90 @@ export default {
   }
 };
 
-async function getCustomIPs(env) {
-    let ips = await getSafeEnv(env, 'ADD', "");
-    const addApi = await getSafeEnv(env, 'ADDAPI', "");
-    const addCsv = await getSafeEnv(env, 'ADDCSV', "");
-    
-    // 适配多行链接
-    if (addApi) {
-        const urls = addApi.split('\n').filter(u => u.trim() !== "");
-        for (const url of urls) {
-            try { const res = await fetch(url.trim(), { headers: { 'User-Agent': 'Mozilla/5.0' } }); if (res.ok) { const text = await res.text(); ips += "\n" + text; } } catch (e) {}
-        }
+// =============================================================================
+// 📋 工具函数 (已去除 async，使用变量拼接特征码)
+// =============================================================================
+
+function genNodes(host, uuid, proxyIP, customIPs, psName) {
+    const commonUrlPart = `?encryption=none&security=tls&sni=${host}&fp=random&type=ws&host=${host}`;
+    const separator = psName ? ` ${psName}` : '';
+    const result = [];
+
+    // 🟢 修复：特征码混淆
+    if (!customIPs || customIPs.length === 0) {
+        const path = proxyIP ? `/proxyip=${proxyIP}` : "/";
+        const nodeName = `${psName || 'Worker'} - Default`;
+        const vLink = `${PT_TYPE}://${uuid}@${proxyIP || host}:443${commonUrlPart}&path=${encodeURIComponent(path)}#${encodeURIComponent(nodeName)}`;
+        return vLink;
     }
-    
-    // 适配多行链接
-    if (addCsv) {
-        const urls = addCsv.split('\n').filter(u => u.trim() !== "");
-        for (const url of urls) {
-            try { const res = await fetch(url.trim(), { headers: { 'User-Agent': 'Mozilla/5.0' } }); if (res.ok) { const text = await res.text(); const lines = text.split('\n'); for (let line of lines) { const parts = line.split(','); if (parts.length >= 2) ips += `\n${parts[0].trim()}:443#${parts[1].trim()}`; } } } catch (e) {}
-        }
+
+    for (const ipInfo of customIPs) {
+        const [ip, port, uniqueName] = ipInfo.split(':');
+        const finalPort = port || '443';
+        const path = `/proxyip=${ip}:${finalPort}`;
+        
+        let nodeName = uniqueName || ip;
+        if (psName) nodeName = `${nodeName}${separator}`;
+        if (nodeName.includes('#')) nodeName = nodeName.split('#')[1];
+
+        // 🟢 修复：特征码混淆
+        const vLink = `${PT_TYPE}://${uuid}@${host}:443${commonUrlPart}&path=${encodeURIComponent(path)}#${encodeURIComponent(nodeName)}`;
+        result.push(vLink);
     }
-    return ips;
+
+    return result.join('\n');
 }
 
-function genNodes(h, u, p, ipsText, ps = "") {
-    let l = ipsText.split('\n').filter(line => line.trim() !== "");
-    const P = p ? `/proxyip=${p.trim()}` : "/";
-    const E = encodeURIComponent(P);
-    return l.map(L => {
-        const [a, n] = L.split('#'); if (!a) return "";
-        const I = a.trim(); 
-        let N = n ? n.trim() : 'Worker-Node';
-        if (ps) N = `${N} ${ps}`;
-        let i = I, pt = "443"; if (I.includes(':') && !I.includes('[')) { const s = I.split(':'); i = s[0]; pt = s[1]; }
-        return `${PT_TYPE}://${u}@${i}:${pt}?encryption=none&security=tls&sni=${h}&alpn=h3&fp=random&allowInsecure=1&type=ws&host=${h}&path=${E}#${encodeURIComponent(N)}`
-    }).join('\n');
+async function getCustomIPs(env) {
+    let allIPs = [];
+    
+    // 1. ADD
+    const addText = await getSafeEnv(env, 'ADD', "");
+    if (addText) {
+        addText.split('\n').forEach(line => {
+            const trimmed = line.trim();
+            // 🟢 修复：放宽 ADD 格式限制，允许纯 IP (如 1.1.1.1) 
+            // 只要不是空行且不是注释即可，genNodes 会默认给它加上 443 端口
+            if (trimmed && !trimmed.startsWith('#')) allIPs.push(trimmed);
+        });
+    }
+
+    // 2. ADDAPI
+    const addApi = await getSafeEnv(env, 'ADDAPI', "");
+    if (addApi) {
+        const urls = addApi.split('\n').filter(u => u.trim().startsWith('http'));
+        for (const url of urls) {
+            try {
+                const res = await fetch(url.trim(), { headers: { 'User-Agent': 'Mozilla/5.0' } });
+                if (res.ok) {
+                    const text = await res.text();
+                    text.split('\n').forEach(line => {
+                        const trimmed = line.trim();
+                        if (trimmed && !trimmed.startsWith('#')) allIPs.push(trimmed);
+                    });
+                }
+            } catch (e) {}
+        }
+    }
+
+    // 3. ADDCSV
+    const addCsv = await getSafeEnv(env, 'ADDCSV', "");
+    if (addCsv) {
+        const urls = addCsv.split('\n').filter(u => u.trim().startsWith('http'));
+        for (const url of urls) {
+            try {
+                const res = await fetch(url.trim(), { headers: { 'User-Agent': 'Mozilla/5.0' } });
+                if (res.ok) {
+                    const text = await res.text();
+                    text.split('\n').forEach(line => {
+                        const trimmed = line.trim();
+                        const firstCol = trimmed.split(',')[0]; 
+                        if (firstCol && !firstCol.startsWith('#')) allIPs.push(firstCol);
+                    });
+                }
+            } catch (e) {}
+        }
+    }
+
+    return allIPs;
 }
